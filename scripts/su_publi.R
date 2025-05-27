@@ -12,6 +12,8 @@ library(openalexR)
 oa_var <- 
   c(
     "id",
+    "title",
+    "doi",
     "publication_year",
     "cited_by_count",
     "type",
@@ -46,6 +48,7 @@ su_query <-
   )
   # Export des données
 su_out <- here::here("data", "su_publi.csv")
+
 # ============================================================================
 
 # Import des données
