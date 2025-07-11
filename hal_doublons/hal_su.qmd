@@ -1,0 +1,386 @@
+---
+title: "Documents HAL dans OpenAlex"
+author: "Cellule scientométrie - BSU"
+format: 
+  html:
+    embed-resources: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+---
+
+<br>
+
+Codes pour extraire les données d'OpenAlex :
+
+```{r}
+#| eval: false
+#| include: true
+# Packages
+library(tidyverse)
+library(openalexR)
+library(openalexPro)
+library(data.table)
+
+# Paramètres
+  # Sorbonne université et institutions connexes
+su_chu <- 
+  c(
+    "i39804081",
+    "i4210121705",
+    "i4210102928",
+    "i4210166768", 
+    "i4210153132", 
+    "i4210134887",
+    "i4210090185", 
+    "i2801203653",  
+    "i4210086685"
+  )
+
+
+# ============================================================================
+
+# Requête OpenAlex sous format parquet
+query <- 
+  oa_query(
+    entity = "works",
+    authorships.institutions.lineage = su_chu,
+    primary_location.source.id = "s4306402512"
+  ) %>% 
+  pro_request(verbose = TRUE) %>% 
+  source_to_parquet(corpus = "hal_su")
+```
+
+Codes pour préparer les données une fois extraites : 
+
+```{r}
+#| eval: false
+#| include: true
+# Packages
+library(tidyverse)
+library(data.table)
+library(arrow)
+
+# Import des données
+hal <- open_dataset(here::here("hal_su"))
+# ============================================================================
+
+# Extraction des données sous format data.table
+hal_dt <- 
+  as.data.table(
+    hal %>% 
+      select(
+        "id",
+        "title",
+        "publication_year",
+        "doi",
+        "type",
+        "authorships",
+        "primary_location",
+        "primary_topic",
+        "updated_date",
+        "created_date"
+      ) %>% 
+      collect()
+  )
+
+
+# Sélection des variable nécessaires
+hal_dt <- 
+  hal_dt %>%
+  select(
+    "id",
+    "title",
+    "doi",
+    "type",
+    "publication_year", 
+    "authorships", 
+    "primary_location" = "primary_location.source.display_name",
+    "landing_page_url" = "primary_location.landing_page_url",
+    "primary_topic" = "primary_topic.display_name",
+    "subfield" = "primary_topic.subfield.display_name",
+    "field" = "primary_topic.field.display_name",
+    "domain" = "primary_topic.domain.display_name",
+    "updated_date",
+    "created_date"
+  )
+
+# Désimbriquation de la variable authorships
+hal_dt <- hal_dt %>% unnest(authorships)
+
+hal_dt <- 
+  hal_dt %>% 
+  select(
+    -c(
+      "author_position",
+      "institutions",
+      "countries",
+      "is_corresponding",
+      "raw_author_name",
+      "raw_affiliation_strings",
+      "affiliations"
+    )
+  )
+
+hal_dt <-
+  hal_dt %>% 
+  unnest(author, names_sep = "_") 
+
+hal_dt <- 
+  hal_dt %>% 
+  select(
+    -c(
+      "author_id",
+      "author_orcid"
+    )
+  )
+
+hal_dt <- 
+  hal_dt %>% 
+  group_by(id) %>% 
+  mutate(author_display_name = paste(author_display_name, collapse = ", ")) 
+
+hal_dt <- hal_dt %>% distinct()
+
+# Export 
+hal_dt %>% write_parquet(here::here("hal_doublons", "data", "hal.parquet"))
+```
+
+
+# Données HAL (primary_source dans OpenAlex)
+
+```{r}
+pacman::p_load(
+  tidyverse,
+  data.table,
+  janitor,
+  reactable,
+  patchwork,
+  plotly
+)
+
+hal <- arrow::read_parquet(here::here("hal_doublons", "data", "hal.parquet"))
+hal <- as.data.table(hal)
+```
+
+## Nombre de document par années 
+
+::: column-page-right
+```{r fig.dim = c(3, 2)}
+
+# Figure
+p1 <- 
+  hal %>%
+  mutate(
+    created_date = floor_date(
+      created_date, 
+      unit = "year"
+    )
+  ) %>% 
+  ggplot() + 
+  aes(x = created_date)  + 
+  geom_bar() +
+  scale_y_continuous(
+    expand = c(0, 0),
+    breaks = seq(
+      from = 0,
+      to = 30000,
+      by = 5000
+    )
+  ) +
+  scale_x_date(
+    expand = c(0, 0),
+    date_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_blank(),
+    panel.grid.major.y = element_line(color = "#A8BAC4", size = 0.3),
+    axis.ticks.length.x = unit(0, "mm"),
+    axis.ticks.length.y = unit(0, "mm"),
+    axis.title = element_blank(),
+    axis.line.x.bottom = element_line(color = "black"),
+    axis.text.x = element_blank()
+  ) +
+  labs(
+    x = "Date de création des documents",
+    y = "Nombre de documents créés"
+  )
+
+ggplotly(p1)
+```
+
+<br>
+
+```{r fig.dim = c(3, 2)}
+# Tableau
+hal %>%
+  mutate(
+    created_date = floor_date(
+      created_date, 
+      unit = "year"
+    )
+  ) %>% 
+  mutate(created_date = format(created_date, "%Y")) %>% 
+  tabyl(created_date) %>% 
+  adorn_totals(where = "row") %>% 
+  adorn_pct_formatting() %>% 
+  reactable(
+    showSortable = TRUE,
+    wrap = TRUE,
+    columns = list(
+      n = colDef(align = "right"),
+      percent = colDef(align = "right")
+    )
+  )
+```
+
+:::
+
+<br>
+
+## Part des documents HAL avec ou sans DOI
+
+```{r}
+
+p1 <- 
+  hal %>% 
+  mutate(doi = ifelse(is.na(doi), "sans", "avec")) %>% 
+  ggplot() +
+  aes(x = doi, fill = doi) + 
+  geom_bar() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_blank(),
+    panel.grid.major.y = element_line(color = "#A8BAC4", size = 0.3),
+    axis.ticks.length.x = unit(0, "mm"),
+    axis.ticks.length.y = unit(0, "mm"),
+    axis.title = element_blank(),
+    axis.line.x.bottom = element_line(color = "black"),
+    axis.text.x = element_blank()
+  )
+
+ggplotly(p1)
+```
+
+<br>
+
+## Types de documents
+
+```{r}
+
+hal %>% 
+  count(type) %>% 
+  arrange(desc(n)) %>% 
+  reactable(pagination = FALSE)
+```
+
+<br>
+
+## Doublons avec HAL en primary_source
+
+<br>
+
+
+
+```{r}
+
+  
+# Fonction pour vérifier l'existence de doublons et variables retenues  
+doublons <- 
+  hal %>% 
+  get_dupes(
+    title, 
+    publication_year, 
+    author_display_name
+  ) 
+  
+# Variables conservées pour tableau (variable "author" retiré par soucis d'espace)
+doublons %>% 
+  select(
+    title, 
+    publication_year, 
+    "nbr_doublons" = dupe_count,
+    landing_page_url,
+    updated_date,
+    created_date
+  ) %>% 
+  
+# Tableau  
+  reactable(
+    pagination = FALSE,
+    showSortable = TRUE,
+    height = 500,
+    showPagination = TRUE,
+    defaultColDef = colDef(align = "left")
+  )
+```
+
+<br>
+
+## Doublons par date de création (nombre de date de création différentes par doublons)
+
+```{r}
+doublons %>% 
+  group_by(title, dupe_count) %>% 
+  count(created_date) %>% 
+  arrange(desc(dupe_count)) %>% 
+  reactable(
+    pagination = FALSE,
+    showSortable = TRUE,
+    height = 500,
+    showPagination = TRUE,
+    defaultColDef = colDef(align = "left")
+  )
+```
+
+<br>
+
+## Doublons par date de modification (nombre de date de modification différentes par doublons)
+
+```{r}
+doublons %>% 
+  group_by(title, dupe_count) %>% 
+  count(updated_date) %>% 
+  arrange(desc(dupe_count)) %>% 
+  reactable(
+    pagination = FALSE,
+    showSortable = TRUE,
+    height = 500,
+    showPagination = TRUE,
+    defaultColDef = colDef(align = "left")
+  )
+```
+
+<br>
+
+## Doublons par domaines de recherche
+
+```{r}
+
+doublons %>% 
+  count(domain) %>% 
+
+# Visualisation  
+  ggplot() + 
+  aes(x = domain, y = n, fill = domain) + 
+  geom_col() +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid = element_blank(),
+    panel.grid.major.y = element_line(color = "#A8BAC4", size = 0.3),
+    axis.ticks.length.x = unit(0, "mm"),
+    axis.ticks.length.y = unit(0, "mm"),
+    axis.title = element_blank(),
+    axis.line.x.bottom = element_line(color = "black"),
+    axis.text.x = element_blank()
+  )
+```
+
+<br>
+
+
